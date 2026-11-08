@@ -1842,6 +1842,56 @@ class TestGRPOTrainer(TrlTestCase):
 
         torch.testing.assert_close(loss_masked, loss_excluded)
 
+    def test_sequence_level_is_ignores_token_mask_dropped_token(self):
+        # A token dropped by `vllm_importance_sampling_mode="token_mask"` (ratio 0) must not move the sequence level
+        # importance weight of the tokens that are kept, otherwise its drift can clip the whole sequence.
+        dataset = load_dataset("trl-internal-testing/zen", "standard_prompt_only", split="train")
+        training_args = GRPOConfig(
+            output_dir=self.tmp_dir, loss_type="grpo", importance_sampling_level="sequence", report_to="none"
+        )
+        trainer = GRPOTrainer(
+            model="trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+            reward_funcs="trl-internal-testing/tiny-Qwen2ForSequenceClassification-2.5",
+            args=training_args,
+            train_dataset=dataset,
+        )
+        trainer.model.eval()
+        # Simulate vLLM generation with token_mask correction, without starting vLLM
+        trainer.use_vllm = True
+        trainer.vllm_importance_sampling_correction = True
+
+        device = next(trainer.model.parameters()).device
+        batch_size, prompt_len, completion_len = 2, 3, 6
+        prompt_ids = torch.randint(1, 1000, (batch_size, prompt_len), device=device)
+        completion_ids = torch.randint(1, 1000, (batch_size, completion_len), device=device)
+        completion_mask = torch.ones(batch_size, completion_len, dtype=torch.long, device=device)
+        with torch.no_grad():
+            per_token_logps, _, _ = trainer._get_per_token_logps_and_entropies(
+                trainer.model,
+                torch.cat([prompt_ids, completion_ids], dim=1),
+                torch.ones(batch_size, prompt_len + completion_len, dtype=torch.long, device=device),
+                completion_len,
+            )
+        importance_sampling_ratio = torch.ones(batch_size, completion_len, device=device)
+        importance_sampling_ratio[0, 2] = 0.0
+
+        def loss_with_dropped_token_drift(drift):
+            old_per_token_logps = per_token_logps + 0.05
+            old_per_token_logps[0, 2] = per_token_logps[0, 2] - drift
+            inputs = {
+                "prompt_ids": prompt_ids,
+                "prompt_mask": torch.ones(batch_size, prompt_len, dtype=torch.long, device=device),
+                "completion_ids": completion_ids,
+                "completion_mask": completion_mask,
+                "advantages": torch.tensor([1.0, -1.0], device=device),
+                "old_per_token_logps": old_per_token_logps,
+                "importance_sampling_ratio": importance_sampling_ratio,
+                "num_items_in_batch": completion_mask.sum(),
+            }
+            return trainer._compute_loss(trainer.model, inputs)
+
+        torch.testing.assert_close(loss_with_dropped_token_drift(-0.05), loss_with_dropped_token_drift(2.0))
+
     @pytest.mark.parametrize(
         "vllm_importance_sampling_mode", ["token_truncate", "token_mask", "sequence_truncate", "sequence_mask"]
     )

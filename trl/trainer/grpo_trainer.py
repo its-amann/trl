@@ -3206,7 +3206,11 @@ class GRPOTrainer(_BaseTrainer):
         if self.importance_sampling_level == "token":
             log_importance_weights = log_ratio
         elif self.importance_sampling_level == "sequence":
-            log_importance_weights = (log_ratio * mask).sum(-1) / mask.sum(-1).clamp(min=1.0)
+            # `token_mask` drops a token by zeroing its ratio: keep it out of the sequence weight too, as for VESPO
+            seq_mask = mask
+            if self.use_vllm and self.vllm_importance_sampling_correction:
+                seq_mask = mask * (inputs["importance_sampling_ratio"] > 0)
+            log_importance_weights = (log_ratio * seq_mask).sum(-1) / seq_mask.sum(-1).clamp(min=1.0)
             log_importance_weights = log_importance_weights.unsqueeze(-1)
         else:
             raise ValueError(
