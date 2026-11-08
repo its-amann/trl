@@ -2057,6 +2057,20 @@ class TestComputeFlopsPerToken(TrlTestCase):
         assert half_moe < all_moe
         assert half_moe == two_dense
 
+    def test_moe_counts_shared_expert(self):
+        # Qwen2-MoE runs a shared expert MLP (plus its 1-wide gate) on every token next to the routed experts.
+        cfg = Qwen2MoeConfig(
+            hidden_size=64,
+            num_hidden_layers=2,
+            moe_intermediate_size=32,
+            shared_expert_intermediate_size=128,
+            vocab_size=100,
+        )
+        with_shared = compute_flops_per_token(cfg, 512)
+        cfg.shared_expert_intermediate_size = 256
+        wider_shared = compute_flops_per_token(cfg, 512)
+        assert wider_shared - with_shared == 3 * cfg.num_hidden_layers * 2 * 3 * cfg.hidden_size * 128
+
     def test_config_without_head_dim(self):
         # `head_dim` is optional on configs: Qwen2 doesn't declare it. Falling back to `hidden_size //
         # num_attention_heads` must give the same result as setting it explicitly.

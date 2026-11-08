@@ -1667,6 +1667,13 @@ def compute_flops_per_token(config: PretrainedConfig, seq_len: int) -> int:
         expert_intermediate_size = getattr(config, "moe_intermediate_size", None) or config.intermediate_size
         moe_mlp_flops = num_experts_per_tok * 2 * 3 * h * expert_intermediate_size
         moe_mlp_flops += 2 * h * num_experts
+        # Shared experts run on every token: Qwen2-MoE has one `shared_expert_intermediate_size` wide MLP plus a
+        # 1-wide sigmoid gate, DeepSeek has `n_shared_experts` experts of the routed width.
+        shared_intermediate_size = getattr(config, "shared_expert_intermediate_size", None)
+        if shared_intermediate_size:
+            moe_mlp_flops += 2 * 3 * h * shared_intermediate_size + 2 * h
+        else:
+            moe_mlp_flops += (getattr(config, "n_shared_experts", None) or 0) * 2 * 3 * h * expert_intermediate_size
         dense_mlp_flops = 2 * 3 * h * config.intermediate_size  # interspersed dense layers
         # transformers puts the sparse block on layer `i` when `(i + 1) % decoder_sparse_step == 0`
         # and `i` is not in `mlp_only_layers`; a config declaring neither (Mixtral) is sparse in
